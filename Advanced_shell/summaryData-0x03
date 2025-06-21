@@ -1,129 +1,147 @@
 #!/bin/bash
 
-# Multiple Pokémon API fetcher script
-# Fetches data for multiple Pokémon and saves to separate files
+# Pokémon Summary Report Generator
+# Reads JSON files and generates CSV report with statistics
 
 # Configuration
-API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
-OUTPUT_DIR="pokemon_data"
-ERROR_FILE="errors.txt"
-DELAY_SECONDS=1  # Delay between requests to handle rate limiting
+INPUT_DIR="pokemon_data"
+OUTPUT_CSV="pokemon_report.csv"
+TEMP_DATA="temp_pokemon_data.txt"
 
-# List of Pokémon to fetch
-POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
-
-# Function to log errors with timestamp
-log_error() {
-    local pokemon_name="$1"
-    local error_message="$2"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] ERROR ($pokemon_name): $error_message" >> "$ERROR_FILE"
+# Function to check if required tools are available
+check_dependencies() {
+    for cmd in jq awk; do
+        if ! command -v "$cmd" &> /dev/null; then
+            echo "❌ Error: $cmd is not installed or not in PATH"
+            exit 1
+        fi
+    done
 }
 
-# Function to fetch single Pokémon data
-fetch_pokemon() {
-    local pokemon_name="$1"
-    local api_url="${API_BASE_URL}/${pokemon_name}"
-    local output_file="${OUTPUT_DIR}/${pokemon_name}.json"
+# Function to extract data from a single JSON file
+extract_pokemon_data() {
+    local json_file="$1"
+    local pokemon_name
+    local height_dm
+    local weight_hg
+    local height_m
+    local weight_kg
     
-    echo "Fetching data for ${pokemon_name}..."
+    # Extract name and capitalize first letter
+    pokemon_name=$(jq -r '.name' "$json_file" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
     
-    # Make the API request
-    local http_status
-    http_status=$(curl -s -w "%{http_code}" -o temp_${pokemon_name}.json "$api_url")
+    # Extract height (decimeters) and convert to meters
+    height_dm=$(jq -r '.height' "$json_file")
+    height_m=$(echo "$height_dm" | awk '{printf "%.1f", $1/10}')
     
-    # Check if curl command was successful
-    if [ $? -ne 0 ]; then
-        log_error "$pokemon_name" "Failed to connect to Pokémon API"
-        rm -f temp_${pokemon_name}.json
-        echo "❌ Failed to fetch ${pokemon_name} - connection error"
-        return 1
+    # Extract weight (hectograms) and convert to kg
+    weight_hg=$(jq -r '.weight' "$json_file")
+    weight_kg=$(echo "$weight_hg" | awk '{printf "%.1f", $1/10}')
+    
+    # Output in format: name,height,weight
+    echo "$pokemon_name,$height_m,$weight_kg"
+}
+
+# Function to generate CSV report
+generate_csv_report() {
+    echo "Generating CSV report..."
+    
+    # Create CSV header
+    echo "Name,Height (m),Weight (kg)" > "$OUTPUT_CSV"
+    
+    # Clear temp data file
+    > "$TEMP_DATA"
+    
+    # Process each JSON file in the directory
+    if [ -d "$INPUT_DIR" ] && [ "$(ls -A "$INPUT_DIR"/*.json 2>/dev/null)" ]; then
+        for json_file in "$INPUT_DIR"/*.json; do
+            if [ -f "$json_file" ]; then
+                # Extract data and add to CSV
+                data=$(extract_pokemon_data "$json_file")
+                echo "$data" >> "$OUTPUT_CSV"
+                
+                # Also save to temp file for calculations (without name)
+                echo "$data" | cut -d',' -f2,3 >> "$TEMP_DATA"
+            fi
+        done
+    else
+        echo "❌ No JSON files found in $INPUT_DIR directory"
+        echo "Please run the fetch script first to generate Pokémon data files"
+        exit 1
     fi
+}
+
+# Function to calculate statistics using awk
+calculate_statistics() {
+    echo "Calculating statistics..."
     
-    # Check HTTP status code
-    case $http_status in
-        200)
-            # Success - move temp file to final output
-            mv temp_${pokemon_name}.json "$output_file"
-            echo "Saved data to ${output_file} ✅"
-            return 0
-            ;;
-        404)
-            log_error "$pokemon_name" "Pokémon not found (HTTP 404)"
-            rm -f temp_${pokemon_name}.json
-            echo "❌ Pokémon ${pokemon_name} not found"
-            return 1
-            ;;
-        429)
-            log_error "$pokemon_name" "Rate limited (HTTP 429)"
-            rm -f temp_${pokemon_name}.json
-            echo "⚠️  Rate limited for ${pokemon_name} - waiting longer..."
-            sleep 5  # Wait longer for rate limiting
-            return 1
-            ;;
-        *)
-            log_error "$pokemon_name" "API request failed with HTTP status: $http_status"
-            rm -f temp_${pokemon_name}.json
-            echo "❌ Failed to fetch ${pokemon_name} - HTTP $http_status"
-            return 1
-            ;;
-    esac
+    # Use awk to calculate averages
+    awk -F',' '
+    BEGIN {
+        sum_height = 0
+        sum_weight = 0
+        count = 0
+    }
+    {
+        sum_height += $1
+        sum_weight += $2
+        count++
+    }
+    END {
+        if (count > 0) {
+            avg_height = sum_height / count
+            avg_weight = sum_weight / count
+            printf "Average Height: %.2f m\n", avg_height
+            printf "Average Weight: %.2f kg\n", avg_weight
+        } else {
+            print "No data to calculate averages"
+        }
+    }' "$TEMP_DATA"
+}
+
+# Function to display the CSV content
+display_csv_content() {
+    echo ""
+    # Sort the CSV by name (skip header)
+    (head -n 1 "$OUTPUT_CSV"; tail -n +2 "$OUTPUT_CSV" | sort) | while IFS= read -r line; do
+        echo "$line"
+    done
+    echo ""
 }
 
 # Main execution
 main() {
-    echo "🚀 Starting multiple Pokémon fetch script..."
-    echo "Target Pokémon: ${POKEMON_LIST[*]}"
-    echo "Output directory: $OUTPUT_DIR"
-    echo "Delay between requests: ${DELAY_SECONDS}s"
+    echo "🚀 Generating Pokémon Summary Report..."
+    echo "Input directory: $INPUT_DIR"
+    echo "Output file: $OUTPUT_CSV"
     echo "----------------------------------------"
     
-    # Create output directory if it doesn't exist
-    if [ ! -d "$OUTPUT_DIR" ]; then
-        mkdir -p "$OUTPUT_DIR"
-        echo "📁 Created directory: $OUTPUT_DIR"
-    fi
+    # Check dependencies
+    check_dependencies
     
-    # Check if curl is available
-    if ! command -v curl &> /dev/null; then
-        echo "❌ Error: curl is not installed or not in PATH"
+    # Generate the CSV report
+    generate_csv_report
+    
+    # Check if CSV was created successfully
+    if [ ! -f "$OUTPUT_CSV" ] || [ ! -s "$OUTPUT_CSV" ]; then
+        echo "❌ Failed to generate CSV report"
         exit 1
     fi
     
-    # Counters for summary
-    local success_count=0
-    local total_count=${#POKEMON_LIST[@]}
+    echo "CSV Report generated at: $OUTPUT_CSV"
+    echo ""
     
-    # Loop through each Pokémon
-    for pokemon in "${POKEMON_LIST[@]}"; do
-        # Convert to lowercase for API consistency
-        pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
-        
-        # Fetch the Pokémon data
-        if fetch_pokemon "$pokemon_lower"; then
-            ((success_count++))
-        fi
-        
-        # Add delay between requests to handle rate limiting
-        # Skip delay for the last Pokémon
-        if [ "$pokemon" != "${POKEMON_LIST[-1]}" ]; then
-            sleep $DELAY_SECONDS
-        fi
-    done
+    # Display the CSV content
+    display_csv_content
     
-    echo "----------------------------------------"
-    echo "📊 Summary: Successfully fetched $success_count out of $total_count Pokémon"
+    # Calculate and display statistics
+    calculate_statistics
     
-    # Show any errors if they occurred
-    if [ -f "$ERROR_FILE" ] && [ -s "$ERROR_FILE" ]; then
-        echo "⚠️  Some errors occurred - check $ERROR_FILE for details"
-    fi
+    # Cleanup temp file
+    rm -f "$TEMP_DATA"
     
-    # List created files
-    if [ $success_count -gt 0 ]; then
-        echo "📁 Created files:"
-        ls -la "$OUTPUT_DIR"/*.json 2>/dev/null | awk '{print "   " $9 " (" $5 " bytes)"}'
-    fi
+    echo ""
+    echo "✅ Report generation completed!"
 }
 
 # Run the main function
