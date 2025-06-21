@@ -1,1 +1,59 @@
+#!/bin/bash
 
+# Pokémon API automation script
+# Fetches Pikachu data and saves to data.json or logs errors to errors.txt
+
+# Configuration
+POKEMON_NAME="pikachu"
+API_URL="https://pokeapi.co/api/v2/pokemon/${POKEMON_NAME}"
+OUTPUT_FILE="data.json"
+ERROR_FILE="errors.txt"
+
+# Function to log errors with timestamp
+log_error() {
+    local error_message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] ERROR: $error_message" >> "$ERROR_FILE"
+}
+
+echo "Fetching Pokémon data for $POKEMON_NAME..."
+
+# Make the API request with curl
+# -s: silent mode (no progress bar)
+# -w: write out HTTP status code
+# -o: output response body to file
+http_status=$(curl -s -w "%{http_code}" -o temp_response.json "$API_URL")
+
+# Check if curl command was successful
+if [ $? -ne 0 ]; then
+    log_error "Failed to connect to Pokémon API"
+    rm -f temp_response.json
+    echo "❌ Failed to connect to API - check $ERROR_FILE for details"
+    exit 1
+fi
+
+# Check HTTP status code
+case $http_status in
+    200)
+        # Success - move temp file to final output
+        mv temp_response.json "$OUTPUT_FILE"
+        echo "✅ Successfully saved Pokémon data to $OUTPUT_FILE"
+        
+        # Display file size for confirmation
+        file_size=$(wc -c < "$OUTPUT_FILE")
+        echo "📁 File size: $file_size bytes"
+        exit 0
+        ;;
+    404)
+        log_error "Pokémon '$POKEMON_NAME' not found (HTTP 404)"
+        rm -f temp_response.json
+        echo "❌ Pokémon not found - check $ERROR_FILE for details"
+        exit 1
+        ;;
+    *)
+        log_error "API request failed with HTTP status: $http_status"
+        rm -f temp_response.json
+        echo "❌ API request failed with status $http_status - check $ERROR_FILE for details"
+        exit 1
+        ;;
+esac
