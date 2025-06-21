@@ -1,0 +1,130 @@
+#!/bin/bash
+
+# Multiple Pokémon API fetcher script
+# Fetches data for multiple Pokémon and saves to separate files
+
+# Configuration
+API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+OUTPUT_DIR="pokemon_data"
+ERROR_FILE="errors.txt"
+DELAY_SECONDS=1  # Delay between requests to handle rate limiting
+
+# List of Pokémon to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Function to log errors with timestamp
+log_error() {
+    local pokemon_name="$1"
+    local error_message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] ERROR ($pokemon_name): $error_message" >> "$ERROR_FILE"
+}
+
+# Function to fetch single Pokémon data
+fetch_pokemon() {
+    local pokemon_name="$1"
+    local api_url="${API_BASE_URL}/${pokemon_name}"
+    local output_file="${OUTPUT_DIR}/${pokemon_name}.json"
+    
+    echo "Fetching data for ${pokemon_name}..."
+    
+    # Make the API request
+    local http_status
+    http_status=$(curl -s -w "%{http_code}" -o temp_${pokemon_name}.json "$api_url")
+    
+    # Check if curl command was successful
+    if [ $? -ne 0 ]; then
+        log_error "$pokemon_name" "Failed to connect to Pokémon API"
+        rm -f temp_${pokemon_name}.json
+        echo "❌ Failed to fetch ${pokemon_name} - connection error"
+        return 1
+    fi
+    
+    # Check HTTP status code
+    case $http_status in
+        200)
+            # Success - move temp file to final output
+            mv temp_${pokemon_name}.json "$output_file"
+            echo "Saved data to ${output_file} ✅"
+            return 0
+            ;;
+        404)
+            log_error "$pokemon_name" "Pokémon not found (HTTP 404)"
+            rm -f temp_${pokemon_name}.json
+            echo "❌ Pokémon ${pokemon_name} not found"
+            return 1
+            ;;
+        429)
+            log_error "$pokemon_name" "Rate limited (HTTP 429)"
+            rm -f temp_${pokemon_name}.json
+            echo "⚠️  Rate limited for ${pokemon_name} - waiting longer..."
+            sleep 5  # Wait longer for rate limiting
+            return 1
+            ;;
+        *)
+            log_error "$pokemon_name" "API request failed with HTTP status: $http_status"
+            rm -f temp_${pokemon_name}.json
+            echo "❌ Failed to fetch ${pokemon_name} - HTTP $http_status"
+            return 1
+            ;;
+    esac
+}
+
+# Main execution
+main() {
+    echo "🚀 Starting multiple Pokémon fetch script..."
+    echo "Target Pokémon: ${POKEMON_LIST[*]}"
+    echo "Output directory: $OUTPUT_DIR"
+    echo "Delay between requests: ${DELAY_SECONDS}s"
+    echo "----------------------------------------"
+    
+    # Create output directory if it doesn't exist
+    if [ ! -d "$OUTPUT_DIR" ]; then
+        mkdir -p "$OUTPUT_DIR"
+        echo "📁 Created directory: $OUTPUT_DIR"
+    fi
+    
+    # Check if curl is available
+    if ! command -v curl &> /dev/null; then
+        echo "❌ Error: curl is not installed or not in PATH"
+        exit 1
+    fi
+    
+    # Counters for summary
+    local success_count=0
+    local total_count=${#POKEMON_LIST[@]}
+    
+    # Loop through each Pokémon
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        # Convert to lowercase for API consistency
+        pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
+        
+        # Fetch the Pokémon data
+        if fetch_pokemon "$pokemon_lower"; then
+            ((success_count++))
+        fi
+        
+        # Add delay between requests to handle rate limiting
+        # Skip delay for the last Pokémon
+        if [ "$pokemon" != "${POKEMON_LIST[-1]}" ]; then
+            sleep $DELAY_SECONDS
+        fi
+    done
+    
+    echo "----------------------------------------"
+    echo "📊 Summary: Successfully fetched $success_count out of $total_count Pokémon"
+    
+    # Show any errors if they occurred
+    if [ -f "$ERROR_FILE" ] && [ -s "$ERROR_FILE" ]; then
+        echo "⚠️  Some errors occurred - check $ERROR_FILE for details"
+    fi
+    
+    # List created files
+    if [ $success_count -gt 0 ]; then
+        echo "📁 Created files:"
+        ls -la "$OUTPUT_DIR"/*.json 2>/dev/null | awk '{print "   " $9 " (" $5 " bytes)"}'
+    fi
+}
+
+# Run the main function
+main "$@"
