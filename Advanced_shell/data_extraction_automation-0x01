@@ -22,12 +22,12 @@ height=$(jq -r '.height' "$JSON_FILE" | awk '{printf "%.1f", $1/10}')
 # Extract weight (in hectograms) and convert to kg using awk
 weight=$(jq -r '.weight' "$JSON_FILE" | awk '{print $1/10}')
 
-# Extract types and format them
-# Get all types, capitalize them, and join with " and " if multiple
-types=$(jq -r '.types[].type.name' "$JSON_FILE" | \
-        awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}' | \
-        awk 'BEGIN{ORS=""} {if(NR>1) print " and "; print $0} END{print ""}')
+# Extract type and format it (taking first type, capitalized)
+type=$(jq -r '.types[0].type.name' "$JSON_FILE" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
 
-# Format the final output using sed for any final text processing
-echo "$name is of type $types, weighs ${weight}kg, and is ${height}m tall." | \
-sed 's/\.0kg/kg/g; s/\.0m/m/g'
+# Format weight and height (remove .0 if present)
+formatted_weight=$(echo "$weight" | sed 's/\.0$//')
+formatted_height=$(echo "$height" | sed 's/\.0$//')
+
+# Format the final output using the exact required format
+echo "$name is of type $type, weighs ${formatted_weight}kg, and is ${formatted_height}m tall."
