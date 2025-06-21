@@ -1,0 +1,422 @@
+#!/bin/bash
+
+# Parallel Pokémon API fetcher script
+# Fetches data for multiple Pokémon in parallel using background processes
+
+# Configuration
+API_BASE_URL="https://pokeapi.co/api/v2/pokemon"
+OUTPUT_DIR="pokemon_data"
+ERROR_FILE="errors.txt"
+SUCCESS_FILE="success.txt"
+TEMP_DIR="temp_parallel"
+MAX_RETRIES=3
+RETRY_DELAY=2
+REQUEST_TIMEOUT=30
+
+# List of Pokémon to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Array to store background process IDs
+declare -a BACKGROUND_PIDS=()
+
+# Function to log messages with timestamp
+log_message() {
+    local log_file="$1"
+    local pokemon_name="$2"
+    local message="$3"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] ($pokemon_name): $message" >> "$log_file"
+}
+
+# Function to validate Pokémon name
+validate_pokemon_name() {
+    local pokemon_name="$1"
+    if [[ ! "$pokemon_name" =~ ^[a-zA-Z0-9-]+$ ]] || [ ${#pokemon_name} -eq 0 ] || [ ${#pokemon_name} -gt 50 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Function to fetch single Pokémon data (runs in background)
+fetch_pokemon_worker() {
+    local pokemon_name="$1"
+    local worker_id="$$"
+    local api_url="${API_BASE_URL}/${pokemon_name}"
+    local output_file="${OUTPUT_DIR}/${pokemon_name}.json"
+    local temp_file="${TEMP_DIR}/${pokemon_name}_${worker_id}.json"
+    local status_file="${TEMP_DIR}/${pokemon_name}_status.txt"
+    local attempt=1
+    
+    # Create status file to track this worker
+    echo "RUNNING" > "$status_file"
+    
+    log_message "$ERROR_FILE" "$pokemon_name" "Worker $worker_id started"
+    
+    # Validate Pokémon name
+    if ! validate_pokemon_name "$pokemon_name"; then
+        log_message "$ERROR_FILE" "$pokemon_name" "Invalid Pokémon name format"
+        echo "FAILED:Invalid name format" > "$status_file"
+        return 1
+    fi
+    
+    # Retry loop
+    while [ $attempt -le $MAX_RETRIES ]; do
+        log_message "$ERROR_FILE" "$pokemon_name" "Worker $worker_id - Attempt $attempt of $MAX_RETRIES"
+        
+        # Make the API request
+        local http_status
+        http_status=$(curl -s -w "%{http_code}" -m $REQUEST_TIMEOUT --connect-timeout 10 \
+                     -o "$temp_file" "$api_url")
+        local curl_exit_code=$?
+        
+        # Check curl exit code
+        if [ $curl_exit_code -ne 0 ]; then
+            local error_msg
+            case $curl_exit_code in
+                6)  error_msg="Couldn't resolve host" ;;
+                7)  error_msg="Failed to connect to host" ;;
+                28) error_msg="Operation timeout" ;;
+                *)  error_msg="Curl error (code: $curl_exit_code)" ;;
+            esac
+            
+            log_message "$ERROR_FILE" "$pokemon_name" "Worker $worker_id - $error_msg (attempt $attempt)"
+            rm -f "$temp_file"
+            
+            if [ $attempt -eq $MAX_RETRIES ]; then
+                echo "FAILED:$error_msg" > "$status_file"
+                return 1
+            else
+                sleep $RETRY_DELAY
+                ((attempt++))
+                continue
+            fi
+        fi
+        
+        # Check HTTP status code
+        case $http_status in
+            200)
+                # Validate JSON response
+                if jq empty "$temp_file" 2>/dev/null; then
+                    # Move to final location
+                    mv "$temp_file" "$output_file"
+                    log_message "$SUCCESS_FILE" "$pokemon_name" "Worker $worker_id - Data fetched successfully (attempt $attempt)"
+                    echo "SUCCESS" > "$status_file"
+                    return 0
+                else
+                    log_message "$ERROR_FILE" "$pokemon_name" "Worker $worker_id - Invalid JSON response (attempt $attempt)"
+                    rm -f "$temp_file"
+                    if [ $attempt -eq $MAX_RETRIES ]; then
+                        echo "FAILED:Invalid JSON" > "$status_file"
+                        return 1
+                    fi
+                fi
+                ;;
+            404)
+                log_message "$ERROR_FILE" "$pokemon_name" "Worker $worker_id - Pokémon not found (HTTP 404)"
+                rm -f "$temp_file"
+                echo "FAILED:Not found (404)" > "$status_file"
+                return 1
+                ;;
+            429)
+                log_message "$ERROR_FILE" "$pokemon_name" "Worker $worker_id - Rate limited (HTTP 429) (attempt $attempt)"
+                rm -f "$temp_file"
+                if [ $attempt -eq $MAX_RETRIES ]; then
+                    echo "FAILED:Rate limited" > "$status_file"
+                    return 1
+                else
+                    sleep $((RETRY_DELAY * 2))  # Wait longer for rate limiting
+                fi
+                ;;
+            *)
+                log_message "$ERROR_FILE" "$pokemon_name" "Worker $worker_id - HTTP error $http_status (attempt $attempt)"
+                rm -f "$temp_file"
+                if [ $attempt -eq $MAX_RETRIES ]; then
+                    echo "FAILED:HTTP $http_status" > "$status_file"
+                    return 1
+                fi
+                ;;
+        esac
+        
+        sleep $RETRY_DELAY
+        ((attempt++))
+    done
+    
+    echo "FAILED:Max retries exceeded" > "$status_file"
+    return 1
+}
+
+# Function to start background workers
+start_parallel_workers() {
+    echo "🚀 Starting parallel workers for ${#POKEMON_LIST[@]} Pokémon..."
+    
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
+        
+        echo "  → Starting worker for $pokemon_lower"
+        
+        # Start background process
+        fetch_pokemon_worker "$pokemon_lower" &
+        local worker_pid=$!
+        
+        # Store PID for later monitoring
+        BACKGROUND_PIDS+=($worker_pid)
+        
+        echo "    Worker PID: $worker_pid"
+    done
+    
+    echo "✅ All ${#BACKGROUND_PIDS[@]} workers started"
+    echo ""
+}
+
+# Function to monitor worker progress
+monitor_workers() {
+    echo "📊 Monitoring worker progress..."
+    local total_workers=${#POKEMON_LIST[@]}
+    local completed=0
+    local running=0
+    
+    while [ $completed -lt $total_workers ]; do
+        completed=0
+        running=0
+        
+        echo -ne "\r🔄 Progress: "
+        
+        for pokemon in "${POKEMON_LIST[@]}"; do
+            pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
+            local status_file="${TEMP_DIR}/${pokemon_lower}_status.txt"
+            
+            if [ -f "$status_file" ]; then
+                local status=$(cat "$status_file")
+                case $status in
+                    "RUNNING")
+                        echo -ne "⏳"
+                        ((running++))
+                        ;;
+                    "SUCCESS")
+                        echo -ne "✅"
+                        ((completed++))
+                        ;;
+                    FAILED:*)
+                        echo -ne "❌"
+                        ((completed++))
+                        ;;
+                esac
+            else
+                echo -ne "⏳"
+                ((running++))
+            fi
+        done
+        
+        echo -ne " ($completed/$total_workers completed, $running running)"
+        
+        if [ $completed -lt $total_workers ]; then
+            sleep 1
+        fi
+    done
+    
+    echo ""
+    echo ""
+}
+
+# Function to wait for all background processes
+wait_for_workers() {
+    echo "⏱️  Waiting for all workers to complete..."
+    
+    local success_count=0
+    local failed_count=0
+    
+    # Wait for each background process
+    for i in "${!BACKGROUND_PIDS[@]}"; do
+        local pid=${BACKGROUND_PIDS[$i]}
+        local pokemon=${POKEMON_LIST[$i]}
+        pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
+        
+        echo "  → Waiting for worker $pid ($pokemon_lower)..."
+        
+        # Wait for specific PID
+        if wait $pid; then
+            echo "    ✅ Worker $pid completed successfully"
+            ((success_count++))
+        else
+            echo "    ❌ Worker $pid failed or was terminated"
+            ((failed_count++))
+        fi
+    done
+    
+    echo ""
+    echo "📊 Worker completion summary:"
+    echo "  ✅ Successful workers: $success_count"
+    echo "  ❌ Failed workers: $failed_count"
+    echo ""
+}
+
+# Function to collect and display results
+collect_results() {
+    echo "📋 Collecting results from all workers..."
+    
+    local success_count=0
+    local failed_count=0
+    local successful_pokemon=()
+    local failed_pokemon=()
+    
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
+        local status_file="${TEMP_DIR}/${pokemon_lower}_status.txt"
+        local output_file="${OUTPUT_DIR}/${pokemon_lower}.json"
+        
+        if [ -f "$status_file" ]; then
+            local status=$(cat "$status_file")
+            case $status in
+                "SUCCESS")
+                    if [ -f "$output_file" ]; then
+                        local file_size=$(wc -c < "$output_file")
+                        echo "  ✅ $pokemon_lower: Success ($file_size bytes)"
+                        successful_pokemon+=("$pokemon_lower")
+                        ((success_count++))
+                    else
+                        echo "  ❌ $pokemon_lower: Success claimed but file missing"
+                        failed_pokemon+=("$pokemon_lower:File missing")
+                        ((failed_count++))
+                    fi
+                    ;;
+                FAILED:*)
+                    local error_reason=${status#FAILED:}
+                    echo "  ❌ $pokemon_lower: Failed ($error_reason)"
+                    failed_pokemon+=("$pokemon_lower:$error_reason")
+                    ((failed_count++))
+                    ;;
+                *)
+                    echo "  ❓ $pokemon_lower: Unknown status ($status)"
+                    failed_pokemon+=("$pokemon_lower:Unknown status")
+                    ((failed_count++))
+                    ;;
+            esac
+        else
+            echo "  ❌ $pokemon_lower: No status file found"
+            failed_pokemon+=("$pokemon_lower:No status file")
+            ((failed_count++))
+        fi
+    done
+    
+    echo ""
+    echo "========================================"
+    echo "📊 FINAL PARALLEL PROCESSING SUMMARY"
+    echo "========================================"
+    echo "✅ Successfully fetched: $success_count out of ${#POKEMON_LIST[@]} Pokémon"
+    echo "❌ Failed to fetch: $failed_count out of ${#POKEMON_LIST[@]} Pokémon"
+    
+    if [ ${#successful_pokemon[@]} -gt 0 ]; then
+        echo ""
+        echo "✅ Successful Pokémon:"
+        for pokemon in "${successful_pokemon[@]}"; do
+            echo "  • $pokemon"
+        done
+    fi
+    
+    if [ ${#failed_pokemon[@]} -gt 0 ]; then
+        echo ""
+        echo "❌ Failed Pokémon:"
+        for pokemon_error in "${failed_pokemon[@]}"; do
+            local pokemon=${pokemon_error%:*}
+            local error=${pokemon_error#*:}
+            echo "  • $pokemon ($error)"
+        done
+    fi
+    
+    return $failed_count
+}
+
+# Function to cleanup temporary files and processes
+cleanup() {
+    echo ""
+    echo "🧹 Cleaning up..."
+    
+    # Kill any remaining background processes
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "  → Terminating worker $pid"
+            kill -TERM "$pid" 2>/dev/null
+            sleep 1
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null
+            fi
+        fi
+    done
+    
+    # Clean up temporary files
+    if [ -d "$TEMP_DIR" ]; then
+        rm -rf "$TEMP_DIR"
+        echo "  → Cleaned temporary directory"
+    fi
+    
+    echo "✅ Cleanup completed"
+}
+
+# Set trap to cleanup on exit or interruption
+trap cleanup EXIT INT TERM
+
+# Main execution
+main() {
+    local start_time=$(date +%s)
+    
+    echo "🚀 Starting parallel Pokémon data fetching..."
+    echo "Target Pokémon: ${POKEMON_LIST[*]}"
+    echo "Output directory: $OUTPUT_DIR"
+    echo "Parallel workers: ${#POKEMON_LIST[@]}"
+    echo "Max retries per worker: $MAX_RETRIES"
+    echo "Request timeout: ${REQUEST_TIMEOUT}s"
+    echo "========================================"
+    echo ""
+    
+    # Check dependencies
+    for cmd in curl jq; do
+        if ! command -v "$cmd" &> /dev/null; then
+            echo "❌ Error: $cmd is not installed or not in PATH"
+            exit 1
+        fi
+    done
+    
+    # Create necessary directories
+    mkdir -p "$OUTPUT_DIR"
+    mkdir -p "$TEMP_DIR"
+    
+    # Initialize log files
+    echo "# Parallel Pokémon API Fetch Log - $(date)" > "$ERROR_FILE"
+    echo "# Success Log - $(date)" > "$SUCCESS_FILE"
+    
+    # Start parallel workers
+    start_parallel_workers
+    
+    # Monitor progress in real-time
+    monitor_workers
+    
+    # Wait for all workers to complete
+    wait_for_workers
+    
+    # Collect and display results
+    if collect_results; then
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        echo ""
+        echo "⏱️  Total execution time: ${duration} seconds"
+        echo "🎯 All parallel processing completed successfully!"
+        exit 0
+    else
+        local failed_count=$?
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        echo ""
+        echo "⏱️  Total execution time: ${duration} seconds"
+        echo "⚠️  Parallel processing completed with $failed_count failures"
+        echo "📄 Check $ERROR_FILE for detailed error information"
+        
+        if [ $failed_count -eq ${#POKEMON_LIST[@]} ]; then
+            exit 1  # Complete failure
+        else
+            exit 2  # Partial success
+        fi
+    fi
+}
+
+# Run the main function
+main "$@"
