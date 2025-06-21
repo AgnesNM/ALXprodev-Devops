@@ -27,14 +27,14 @@ extract_pokemon_data() {
     local height_m
     local weight_kg
     
-    # Extract name and capitalize first letter
-    pokemon_name=$(jq -r '.name' "$json_file" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+    # Extract name and capitalize first letter using awk
+    pokemon_name=$(jq -r '.name' "$json_file" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
     
-    # Extract height (decimeters) and convert to meters
+    # Extract height (decimeters) and convert to meters using awk
     height_dm=$(jq -r '.height' "$json_file")
     height_m=$(echo "$height_dm" | awk '{printf "%.1f", $1/10}')
     
-    # Extract weight (hectograms) and convert to kg
+    # Extract weight (hectograms) and convert to kg using awk
     weight_hg=$(jq -r '.weight' "$json_file")
     weight_kg=$(echo "$weight_hg" | awk '{printf "%.1f", $1/10}')
     
@@ -60,8 +60,8 @@ generate_csv_report() {
                 data=$(extract_pokemon_data "$json_file")
                 echo "$data" >> "$OUTPUT_CSV"
                 
-                # Also save to temp file for calculations (without name)
-                echo "$data" | cut -d',' -f2,3 >> "$TEMP_DATA"
+                # Also save to temp file for calculations (extract height,weight using awk)
+                echo "$data" | awk -F',' '{print $2","$3}' >> "$TEMP_DATA"
             fi
         done
     else
@@ -102,10 +102,8 @@ calculate_statistics() {
 # Function to display the CSV content
 display_csv_content() {
     echo ""
-    # Sort the CSV by name (skip header)
-    (head -n 1 "$OUTPUT_CSV"; tail -n +2 "$OUTPUT_CSV" | sort) | while IFS= read -r line; do
-        echo "$line"
-    done
+    # Use awk to sort the CSV by name (skip header)
+    awk 'NR==1 {print; next} {print | "sort"}' "$OUTPUT_CSV"
     echo ""
 }
 
