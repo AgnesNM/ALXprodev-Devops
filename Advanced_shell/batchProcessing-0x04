@@ -168,9 +168,9 @@ start_parallel_workers() {
     echo ""
 }
 
-# Function to monitor worker progress
+# Function to monitor worker progress using jobs
 monitor_workers() {
-    echo "📊 Monitoring worker progress..."
+    echo "📊 Monitoring worker progress using jobs..."
     local total_workers=${#POKEMON_LIST[@]}
     local completed=0
     local running=0
@@ -180,6 +180,10 @@ monitor_workers() {
         running=0
         
         echo -ne "\r🔄 Progress: "
+        
+        # Use jobs to check background process status
+        local active_jobs=$(jobs -r | wc -l)
+        local stopped_jobs=$(jobs -s | wc -l)
         
         for pokemon in "${POKEMON_LIST[@]}"; do
             pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
@@ -207,10 +211,20 @@ monitor_workers() {
             fi
         done
         
-        echo -ne " ($completed/$total_workers completed, $running running)"
+        echo -ne " ($completed/$total_workers completed, $active_jobs active jobs)"
+        
+        # Show active jobs status
+        if [ $active_jobs -gt 0 ]; then
+            echo ""
+            echo "  Active background jobs:"
+            jobs -l | while read job_line; do
+                echo "    $job_line"
+            done
+        fi
         
         if [ $completed -lt $total_workers ]; then
-            sleep 1
+            sleep 2
+            echo -ne "\r"
         fi
     done
     
@@ -218,12 +232,17 @@ monitor_workers() {
     echo ""
 }
 
-# Function to wait for all background processes
+# Function to wait for all background processes using jobs
 wait_for_workers() {
-    echo "⏱️  Waiting for all workers to complete..."
+    echo "⏱️  Waiting for all workers to complete using jobs..."
     
     local success_count=0
     local failed_count=0
+    
+    # Show current job status
+    echo "📋 Current background jobs:"
+    jobs -l
+    echo ""
     
     # Wait for each background process
     for i in "${!BACKGROUND_PIDS[@]}"; do
@@ -232,6 +251,10 @@ wait_for_workers() {
         pokemon_lower=$(echo "$pokemon" | tr '[:upper:]' '[:lower:]')
         
         echo "  → Waiting for worker $pid ($pokemon_lower)..."
+        
+        # Check if job is still running using jobs
+        local job_status=$(jobs -l | grep "$pid" | awk '{print $3}' || echo "Done")
+        echo "    Job status: $job_status"
         
         # Wait for specific PID
         if wait $pid; then
@@ -242,6 +265,11 @@ wait_for_workers() {
             ((failed_count++))
         fi
     done
+    
+    # Final jobs check
+    echo ""
+    echo "📋 Final jobs status:"
+    jobs -l || echo "  No active jobs remaining"
     
     echo ""
     echo "📊 Worker completion summary:"
@@ -326,10 +354,14 @@ collect_results() {
     return $failed_count
 }
 
-# Function to cleanup temporary files and processes
+# Function to cleanup temporary files and processes using jobs
 cleanup() {
     echo ""
-    echo "🧹 Cleaning up..."
+    echo "🧹 Cleaning up using jobs management..."
+    
+    # Show current jobs before cleanup
+    echo "📋 Current jobs before cleanup:"
+    jobs -l || echo "  No active jobs"
     
     # Kill any remaining background processes
     for pid in "${BACKGROUND_PIDS[@]}"; do
@@ -342,6 +374,11 @@ cleanup() {
             fi
         fi
     done
+    
+    # Wait a moment and check jobs again
+    sleep 1
+    echo "📋 Jobs after cleanup:"
+    jobs -l || echo "  No active jobs remaining"
     
     # Clean up temporary files
     if [ -d "$TEMP_DIR" ]; then
@@ -384,8 +421,13 @@ main() {
     echo "# Parallel Pokémon API Fetch Log - $(date)" > "$ERROR_FILE"
     echo "# Success Log - $(date)" > "$SUCCESS_FILE"
     
-    # Start parallel workers
+    # Start parallel workers and track with jobs
     start_parallel_workers
+    
+    # Show initial jobs status
+    echo "📋 Background jobs started:"
+    jobs -l
+    echo ""
     
     # Monitor progress in real-time
     monitor_workers
