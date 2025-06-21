@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Advanced text manipulation script to extract Pokémon data
+# Uses jq, awk, and sed to parse and format JSON data
+
+JSON_FILE="data.json"
+
+# Check if JSON file exists
+if [ ! -f "$JSON_FILE" ]; then
+    echo "Error: $JSON_FILE not found. Please run the API fetch script first."
+    exit 1
+fi
+
+# Extract data using jq and process with awk and sed
+
+# Extract name and capitalize first letter
+name=$(jq -r '.name' "$JSON_FILE" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+
+# Extract height (in decimeters) and convert to meters using awk
+height=$(jq -r '.height' "$JSON_FILE" | awk '{printf "%.1f", $1/10}')
+
+# Extract weight (in hectograms) and convert to kg using awk
+weight=$(jq -r '.weight' "$JSON_FILE" | awk '{print $1/10}')
+
+# Extract types and format them
+# Get all types, capitalize them, and join with " and " if multiple
+types=$(jq -r '.types[].type.name' "$JSON_FILE" | \
+        awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}' | \
+        awk 'BEGIN{ORS=""} {if(NR>1) print " and "; print $0} END{print ""}')
+
+# Format the final output using sed for any final text processing
+echo "$name is of type $types, weighs ${weight}kg, and is ${height}m tall." | \
+sed 's/\.0kg/kg/g; s/\.0m/m/g'
